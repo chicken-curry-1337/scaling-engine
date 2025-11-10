@@ -55,7 +55,7 @@ server {
 
     location / {
 
-        if ($request_method = OPTIONS) {
+        if (\$request_method = OPTIONS) {
             add_header Access-Control-Allow-Origin "*";
             add_header Access-Control-Allow-Methods "GET, POST, PUT, PATCH, DELETE, OPTIONS";
             add_header Access-Control-Allow-Headers "Content-Type, Authorization";
@@ -157,7 +157,7 @@ server {
     }
 
     location / {
-        if ($request_method = OPTIONS) {
+        if (\$request_method = OPTIONS) {
             add_header Access-Control-Allow-Origin "*";
             add_header Access-Control-Allow-Methods "GET, POST, PUT, PATCH, DELETE, OPTIONS";
             add_header Access-Control-Allow-Headers "Content-Type, Authorization";
