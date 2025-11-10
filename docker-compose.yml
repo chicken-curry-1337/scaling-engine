@@ -1,0 +1,52 @@
+version: "3.9"
+
+services:
+  database:
+    container_name: kupipodariday-database
+    image: postgres:16
+    restart: unless-stopped
+    env_file:
+      - ./.env
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - internal
+
+  backend:
+    container_name: kupipodariday-backend
+    build:
+      context: ./backend
+    restart: unless-stopped
+    env_file:
+      - ./.env
+    depends_on:
+      database:
+        condition: service_healthy
+    ports:
+      - "4000:3000"
+    networks:
+      - internal
+
+  frontend:
+    container_name: kupipodariday-frontend
+    build:
+      context: ./frontend
+    restart: unless-stopped
+    depends_on:
+      - backend
+    ports:
+      - "8081:80"
+    networks:
+      - internal
+
+volumes:
+  postgres_data:
+
+networks:
+  internal:
+    driver: bridge
