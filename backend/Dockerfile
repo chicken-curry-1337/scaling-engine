@@ -1,4 +1,4 @@
-FROM node:16-alpine AS builder
+FROM node:20-alpine AS builder
 WORKDIR /app
 
 # Install all dependencies (including dev) for building
@@ -12,7 +12,7 @@ COPY src ./src
 # Produce the compiled JavaScript output
 RUN npm run build
 
-FROM node:16-alpine AS runner
+FROM node:20-alpine AS runner
 WORKDIR /app
 ENV NODE_ENV=production
 
