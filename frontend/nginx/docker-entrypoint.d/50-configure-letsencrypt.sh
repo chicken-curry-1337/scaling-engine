@@ -5,10 +5,14 @@ CERTBOT_WEBROOT=${CERTBOT_WEBROOT:-/var/www/certbot}
 CONF_PATH=/etc/nginx/conf.d/default.conf
 ENABLE_SSL=${ENABLE_SSL:-false}
 SERVER_NAME_VALUE=${SERVER_NAME:-}
+API_SERVER_NAME_VALUE=${API_SERVER_NAME:-}
 LE_EMAIL=${LETSENCRYPT_EMAIL:-}
 CERTBOT_RENEW_INTERVAL_SECONDS=${CERTBOT_RENEW_INTERVAL:-43200}
 USE_STAGING=${LETSENCRYPT_USE_STAGING:-false}
+BACKEND_UPSTREAM=${BACKEND_SERVICE_URL:-http://backend:3000}
+FRONTEND_SERVER_NAME=${SERVER_NAME_VALUE:-_}
 CERTBOT_STAGING_FLAG=""
+CERT_DOMAIN_ARGS=""
 
 case "$CERTBOT_RENEW_INTERVAL_SECONDS" in
   ''|*[!0-9]*)
@@ -18,11 +22,11 @@ esac
 
 mkdir -p "$CERTBOT_WEBROOT"
 
-generate_http_config() {
-  cat >"$CONF_PATH" <<EOF
+append_frontend_http_server() {
+  cat >>"$CONF_PATH" <<EOF
 server {
     listen 80;
-    server_name ${SERVER_NAME_VALUE:-_};
+    server_name ${FRONTEND_SERVER_NAME};
 
     location /.well-known/acme-challenge/ {
         root ${CERTBOT_WEBROOT};
@@ -34,14 +38,38 @@ server {
         try_files \$uri \$uri/ /index.html;
     }
 }
+
 EOF
 }
 
-generate_https_config() {
-  cat >"$CONF_PATH" <<EOF
+append_api_http_server() {
+  [ -z "$API_SERVER_NAME_VALUE" ] && return 0
+  cat >>"$CONF_PATH" <<EOF
 server {
     listen 80;
-    server_name ${SERVER_NAME_VALUE};
+    server_name ${API_SERVER_NAME_VALUE};
+
+    location /.well-known/acme-challenge/ {
+        root ${CERTBOT_WEBROOT};
+    }
+
+    location / {
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_pass ${BACKEND_UPSTREAM};
+    }
+}
+
+EOF
+}
+
+append_frontend_http_redirect() {
+  cat >>"$CONF_PATH" <<EOF
+server {
+    listen 80;
+    server_name ${FRONTEND_SERVER_NAME};
 
     location /.well-known/acme-challenge/ {
         root ${CERTBOT_WEBROOT};
@@ -52,9 +80,33 @@ server {
     }
 }
 
+EOF
+}
+
+append_api_http_redirect() {
+  [ -z "$API_SERVER_NAME_VALUE" ] && return 0
+  cat >>"$CONF_PATH" <<EOF
+server {
+    listen 80;
+    server_name ${API_SERVER_NAME_VALUE};
+
+    location /.well-known/acme-challenge/ {
+        root ${CERTBOT_WEBROOT};
+    }
+
+    location / {
+        return 301 https://\$host\$request_uri;
+    }
+}
+
+EOF
+}
+
+append_frontend_https_server() {
+  cat >>"$CONF_PATH" <<EOF
 server {
     listen 443 ssl;
-    server_name ${SERVER_NAME_VALUE};
+    server_name ${FRONTEND_SERVER_NAME};
 
     ssl_certificate ${CERT_DIR}/fullchain.pem;
     ssl_certificate_key ${CERT_DIR}/privkey.pem;
@@ -71,7 +123,50 @@ server {
         try_files \$uri \$uri/ /index.html;
     }
 }
+
 EOF
+}
+
+append_api_https_server() {
+  [ -z "$API_SERVER_NAME_VALUE" ] && return 0
+  cat >>"$CONF_PATH" <<EOF
+server {
+    listen 443 ssl;
+    server_name ${API_SERVER_NAME_VALUE};
+
+    ssl_certificate ${CERT_DIR}/fullchain.pem;
+    ssl_certificate_key ${CERT_DIR}/privkey.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_ciphers HIGH:!aNULL:!MD5;
+
+    location /.well-known/acme-challenge/ {
+        root ${CERTBOT_WEBROOT};
+    }
+
+    location / {
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_pass ${BACKEND_UPSTREAM};
+    }
+}
+
+EOF
+}
+
+generate_http_config() {
+  : >"$CONF_PATH"
+  append_frontend_http_server
+  append_api_http_server
+}
+
+generate_https_config() {
+  : >"$CONF_PATH"
+  append_frontend_http_redirect
+  append_api_http_redirect
+  append_frontend_https_server
+  append_api_https_server
 }
 
 cert_available() {
@@ -88,8 +183,8 @@ obtain_certificate() {
   certbot certonly --webroot -w "$CERTBOT_WEBROOT" \
     --non-interactive --agree-tos --no-eff-email \
     --email "$LE_EMAIL" \
-    -d "$SERVER_NAME_VALUE" \
-    $CERTBOT_STAGING_FLAG
+    $CERTBOT_STAGING_FLAG \
+    $CERT_DOMAIN_ARGS
 }
 
 renew_certificates() {
@@ -100,11 +195,14 @@ renew_certificates() {
 
 start_certbot_supervisor() {
   (
-    # Allow nginx to bind to port 80 before requesting the first certificate.
     sleep 5
 
     if ! cert_available; then
-      echo "[letsencrypt] Requesting initial certificate for ${SERVER_NAME_VALUE}"
+      MSG="[letsencrypt] Requesting initial certificate for ${SERVER_NAME_VALUE}"
+      if [ -n "$API_SERVER_NAME_VALUE" ]; then
+        MSG="$MSG and ${API_SERVER_NAME_VALUE}"
+      fi
+      echo "$MSG"
       until obtain_certificate; do
         echo "[letsencrypt] Initial request failed, retrying in 30 seconds..." >&2
         sleep 30
@@ -126,14 +224,21 @@ if [ "$ENABLE_SSL" = "true" ]; then
     exit 1
   fi
 
+  if [ -z "$API_SERVER_NAME_VALUE" ]; then
+    echo "API_SERVER_NAME must be defined when ENABLE_SSL=true" >&2
+    exit 1
+  fi
+
   if [ -z "$LE_EMAIL" ]; then
     echo "LETSENCRYPT_EMAIL must be defined when ENABLE_SSL=true" >&2
     exit 1
   fi
 
   CERT_DIR="/etc/letsencrypt/live/$SERVER_NAME_VALUE"
+  CERT_DOMAIN_ARGS="-d $SERVER_NAME_VALUE -d $API_SERVER_NAME_VALUE"
 else
   SERVER_NAME_VALUE=${SERVER_NAME_VALUE:-_}
+  FRONTEND_SERVER_NAME=${SERVER_NAME_VALUE}
 fi
 
 if [ "$ENABLE_SSL" = "true" ] && cert_available; then
