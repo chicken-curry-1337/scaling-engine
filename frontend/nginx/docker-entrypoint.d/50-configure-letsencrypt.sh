@@ -11,6 +11,12 @@ CERTBOT_RENEW_INTERVAL_SECONDS=${CERTBOT_RENEW_INTERVAL:-43200}
 USE_STAGING=${LETSENCRYPT_USE_STAGING:-false}
 BACKEND_UPSTREAM=${BACKEND_SERVICE_URL:-http://backend:3000}
 FRONTEND_SERVER_NAME=${SERVER_NAME_VALUE:-_}
+API_CORS_ALLOWED_ORIGINS_VALUE=${API_CORS_ALLOWED_ORIGINS:-*}
+API_CORS_ALLOW_HEADERS_VALUE=${API_CORS_ALLOW_HEADERS:-Authorization,Content-Type,Accept,Origin}
+API_CORS_ALLOW_METHODS_VALUE=${API_CORS_ALLOW_METHODS:-GET,POST,PUT,PATCH,DELETE,OPTIONS}
+API_CORS_ALLOW_CREDENTIALS_VALUE=${API_CORS_ALLOW_CREDENTIALS:-true}
+API_CORS_MAX_AGE_VALUE=${API_CORS_MAX_AGE:-86400}
+API_CORS_EXPOSE_HEADERS_VALUE=${API_CORS_EXPOSE_HEADERS:-}
 CERTBOT_STAGING_FLAG=""
 CERT_DOMAIN_ARGS=""
 
@@ -52,14 +58,9 @@ server {
     location /.well-known/acme-challenge/ {
         root ${CERTBOT_WEBROOT};
     }
-
-    location / {
-        proxy_set_header Host \$host;
-        proxy_set_header X-Real-IP \$remote_addr;
-        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto \$scheme;
-        proxy_pass ${BACKEND_UPSTREAM};
-    }
+EOF
+  append_api_proxy_location
+  cat >>"$CONF_PATH" <<'EOF'
 }
 
 EOF
@@ -142,27 +143,94 @@ server {
     location /.well-known/acme-challenge/ {
         root ${CERTBOT_WEBROOT};
     }
-
-    location / {
-        proxy_set_header Host \$host;
-        proxy_set_header X-Real-IP \$remote_addr;
-        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto \$scheme;
-        proxy_pass ${BACKEND_UPSTREAM};
-    }
+EOF
+  append_api_proxy_location
+  cat >>"$CONF_PATH" <<'EOF'
 }
 
 EOF
 }
 
+append_api_proxy_location() {
+  cat >>"$CONF_PATH" <<EOF
+    location / {
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+
+        if (\$request_method = OPTIONS) {
+            add_header Access-Control-Allow-Origin \$api_cors_allow_origin always if=\$api_cors_allow_origin;
+            add_header Access-Control-Allow-Credentials ${API_CORS_ALLOW_CREDENTIALS_VALUE} always if=\$api_cors_allow_origin;
+            add_header Access-Control-Allow-Methods "${API_CORS_ALLOW_METHODS_VALUE}" always if=\$api_cors_allow_origin;
+            add_header Access-Control-Allow-Headers "${API_CORS_ALLOW_HEADERS_VALUE}" always if=\$api_cors_allow_origin;
+            add_header Access-Control-Max-Age ${API_CORS_MAX_AGE_VALUE} always if=\$api_cors_allow_origin;
+            add_header Vary Origin always if=\$api_cors_allow_origin;
+            add_header Content-Length 0;
+            add_header Content-Type "text/plain; charset=UTF-8";
+            return 204;
+        }
+
+        add_header Access-Control-Allow-Origin \$api_cors_allow_origin always if=\$api_cors_allow_origin;
+        add_header Access-Control-Allow-Credentials ${API_CORS_ALLOW_CREDENTIALS_VALUE} always if=\$api_cors_allow_origin;
+        add_header Access-Control-Allow-Methods "${API_CORS_ALLOW_METHODS_VALUE}" always if=\$api_cors_allow_origin;
+        add_header Access-Control-Allow-Headers "${API_CORS_ALLOW_HEADERS_VALUE}" always if=\$api_cors_allow_origin;
+        add_header Vary Origin always if=\$api_cors_allow_origin;
+EOF
+  if [ -n "$API_CORS_EXPOSE_HEADERS_VALUE" ]; then
+    cat >>"$CONF_PATH" <<EOF
+        add_header Access-Control-Expose-Headers "${API_CORS_EXPOSE_HEADERS_VALUE}" always if=\$api_cors_allow_origin;
+EOF
+  fi
+  cat >>"$CONF_PATH" <<EOF
+
+        proxy_pass ${BACKEND_UPSTREAM};
+    }
+EOF
+}
+
+append_config_preamble() {
+  append_api_cors_map
+}
+
+append_api_cors_map() {
+  [ -z "$API_SERVER_NAME_VALUE" ] && return 0
+
+  if [ "$API_CORS_ALLOWED_ORIGINS_VALUE" = "*" ]; then
+    cat >>"$CONF_PATH" <<'EOF'
+map $http_origin $api_cors_allow_origin {
+    default "*";
+}
+EOF
+    return 0
+  fi
+
+  cat >>"$CONF_PATH" <<'EOF'
+map $http_origin $api_cors_allow_origin {
+    default "";
+EOF
+
+  printf '%s\n' "$API_CORS_ALLOWED_ORIGINS_VALUE" | tr ',' '\n' | while IFS= read -r origin; do
+    origin=$(printf '%s' "$origin" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
+    [ -z "$origin" ] && continue
+    printf '    "%s" $http_origin;\n' "$origin"
+  done >>"$CONF_PATH"
+
+  cat >>"$CONF_PATH" <<'EOF'
+}
+EOF
+}
+
 generate_http_config() {
   : >"$CONF_PATH"
+  append_config_preamble
   append_frontend_http_server
   append_api_http_server
 }
 
 generate_https_config() {
   : >"$CONF_PATH"
+  append_config_preamble
   append_frontend_http_redirect
   append_api_http_redirect
   append_frontend_https_server
